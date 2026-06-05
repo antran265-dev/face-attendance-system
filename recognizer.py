@@ -24,7 +24,7 @@ class CameraWorker:
         self.cam_id    = cam_id
         self.cam_index = cam_index
         self._face_app = face_app
-        self._db       = db_ref           # tham chiếu dict — update ngay khi db đổi
+        self._db       = db_ref           # thamchiếu dict — update ngay khi db đổi
         self._callback = result_callback  # fn(cam_id, result_dict)
 
         self._cap        = None
