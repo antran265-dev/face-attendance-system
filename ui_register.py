@@ -1,29 +1,35 @@
 from __future__ import annotations
-"""
-ui_register.py — Cửa sổ đăng ký nhân viên mới với dropdown chức vụ.
-"""
-
-import threading
-import time
-import cv2
-import numpy as np
+import threading, time
+import cv2, numpy as np
 import customtkinter as ctk
 from PIL import Image
+from config import AI_INPUT_SIZE, AI_INTERVAL, REG_SAMPLES, ROLE_OPTIONS
 
-from config import AI_INPUT_SIZE, AI_INTERVAL, REG_SAMPLES
 
-# Danh sách chức vụ mặc định — thêm/bớt tuỳ công ty
-ROLE_OPTIONS = [
-    "Công nhân",
-    "Nhân viên văn phòng",
-    "Kỹ sư / Kỹ thuật viên",
-    "Tổ trưởng / Trưởng ca",
-    "Trưởng phòng",
-    "Quản lý",
-    "Bảo vệ",
-    "Lái xe",
-    "Khác",
-]
+class RegisterWindow(ctk.CTkToplevel):
+    """Cửa sổ đăng ký nhân viên: nhập tên + chức vụ -> quét mặt -> lưu."""
+
+    def __init__(self, parent, face_app, existing: list, on_done):
+        super().__init__(parent)
+        self.title("ĐĂNG KÝ NHÂN VIÊN MỚI")
+        self.geometry("760x680")
+        self.resizable(False, False)
+        self.grab_set()
+
+        self._app       = face_app
+        self._existing  = existing
+        self._on_done   = on_done
+        self._cap       = None
+        self._scanning  = False
+        self._finishing = False
+        self._embeds    = []
+        self._lock      = threading.Lock()
+        self._frame     = None
+        self._stop      = threading.Event()
+
+        self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
 
 
 class RegisterWindow(ctk.CTkToplevel):
