@@ -1,15 +1,6 @@
 from __future__ import annotations
-"""
-main.py — Giao diện chính hệ thống chấm công AI.
-Python 3.9+. Chạy: python main.py
-"""
-from __future__ import annotations
-
-import os
-import pickle
-import csv
-import cv2
-import numpy as np
+import csv, os, pickle
+import cv2, numpy as np
 import customtkinter as ctk
 from PIL import Image
 from datetime import datetime
@@ -22,43 +13,41 @@ from ui_register import RegisterWindow
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-C_BG       = "#0d0d1a"
-C_PANEL    = "#111827"
-C_CARD     = "#1a2035"
-C_ACCENT   = "#3b82f6"
-C_GREEN    = "#10b981"
-C_RED      = "#ef4444"
-C_ORANGE   = "#f59e0b"
-C_DIM      = "#6b7280"
-C_BORDER   = "#1e3a5f"
+# Bảng màu
+BG     = "#0d0d1a"
+PANEL  = "#111827"
+CARD   = "#1a2035"
+BLUE   = "#3b82f6"
+GREEN  = "#10b981"
+RED    = "#ef4444"
+ORANGE = "#f59e0b"
+DIM    = "#6b7280"
 
-
-class AttendanceApp(ctk.CTk):
+class App(ctk.CTk):
 
     def __init__(self):
         super().__init__()
         self.title("HỆ THỐNG CHẤM CÔNG AI")
         self.geometry("1280x780")
         self.minsize(1100, 680)
-        self.configure(fg_color=C_BG)
+        self.configure(fg_color=BG)
 
-        self.db         = self._load_db()
-        self.recognizer = FaceRecognizer()
-        self.logger     = AttendanceLogger()
+        self.db   = self._load_db()
+        self.rec  = FaceRecognizer()
+        self.log  = AttendanceLogger()
 
-        self._bbox        = None
-        self._box_color   = (100, 100, 100)
-        self._box_label   = ""
-        self._today_log   = []
-        # FIX LAG: flag chống gọi _refresh_log_panel nhiều lần liên tiếp
-        self._log_refresh_pending = False
+        self._bbox      = None
+        self._bcolor    = (100, 100, 100)
+        self._blabel    = ""
+        self._log_today: list[dict] = []
+        self._log_dirty = False
 
-        self._setup_ui()
-        self.btn_power.configure(state="disabled", text="⏳ ĐANG TẢI AI...", fg_color="#374151")
-        self.btn_register.configure(state="disabled", fg_color="#374151")
-        self._set_status("Đang nạp mô hình AI...", C_ORANGE)
-        self.after(200, self._init_ai)
-        self.after(1000, self._tick_clock)
+        self._build_ui()
+        self.btn_cam.configure(state="disabled", text="⏳ ĐANG TẢI...", fg_color="#374151")
+        self.btn_reg.configure(state="disabled", fg_color="#374151")
+        self._status("Đang nạp mô hình AI...", ORANGE)
+        self.after(200, self._init)
+        self.after(1000, self._tick)
 
     # ── Khởi tạo AI ──────────────────────────────────────────────────────
 
