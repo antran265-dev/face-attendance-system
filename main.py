@@ -51,184 +51,134 @@ class App(ctk.CTk):
 
     # ── Khởi tạo AI ──────────────────────────────────────────────────────
 
-    def _init_ai(self):
+     def _init(self):
         try:
-            self.recognizer.load_model()
-            self.recognizer.set_db(self.db)
-            self.btn_power.configure(state="normal", text="▶  BẬT CAMERA", fg_color=C_GREEN)
-            self.btn_register.configure(state="normal", fg_color=C_ACCENT)
-            self._set_status("Sẵn sàng hoạt động", C_GREEN)
-            self._refresh_today_log()
+            self.rec.load_model()
+            self.rec.set_db(self.db)
+            self.btn_cam.configure(state="normal", text="▶  BẬT CAMERA", fg_color=GREEN, hover_color="#059669")
+            self.btn_reg.configure(state="normal", fg_color=BLUE, hover_color="#2563eb")
+            self._status("Sẵn sàng", GREEN)
+            self._load_today_log()
         except Exception as e:
-            self._set_status(f"Lỗi: {e}", C_RED)
+            self._status(f"Lỗi: {e}", RED)
 
-    # ── Đồng hồ ──────────────────────────────────────────────────────────
-
-    def _tick_clock(self):
+    def _tick(self):
         now = datetime.now()
         self.lbl_clock.configure(text=now.strftime("%H:%M:%S"))
         self.lbl_date.configure(text=now.strftime("%A, %d/%m/%Y"))
-        self.after(1000, self._tick_clock)
+        self.after(1000, self._tick)
 
-    # ══════════════════════════════════════════════════════════════════════
-    # VÒNG LẶP UI — CHỈ VẼ FRAME, KHÔNG LÀM GÌ NẶNG
-    # FIX LAG: tách hoàn toàn việc vẽ camera ra khỏi mọi xử lý UI widget
-    # ══════════════════════════════════════════════════════════════════════
+    # -- Vòng lặp UI --
 
-    def _update_loop(self):
-        if not self.recognizer._is_running:
+    def _loop(self):
+        if not self.rec.is_running:
             return
 
-        frame = self.recognizer.get_current_frame()
+        frame = self.rec.get_frame()
         if frame is not None:
             frame = frame.copy()
-
-            result = self.recognizer.get_result()
+            result = self.rec.get_result()
             if result:
-                self._handle_result(result)
-
+                self._handle(result)
             if self._bbox:
-                x1, y1, x2, y2 = self._bbox
-                cv2.rectangle(frame, (x1, y1), (x2, y2), self._box_color, 2)
-                if self._box_label:
-                    (tw, th), _ = cv2.getTextSize(
-                        self._box_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-                    cv2.rectangle(frame,
-                                  (x1, max(0, y1 - th - 14)),
-                                  (x1 + tw + 10, y1),
-                                  self._box_color, -1)
-                    cv2.putText(frame, self._box_label,
-                                (x1 + 5, y1 - 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-
+                x1,y1,x2,y2 = self._bbox
+                cv2.rectangle(frame, (x1,y1), (x2,y2), self._bcolor, 2)
+                if self._blabel:
+                    (tw,th),_ = cv2.getTextSize(self._blabel, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                    cv2.rectangle(frame, (x1, max(0,y1-th-14)), (x1+tw+10, y1), self._bcolor, -1)
+                    cv2.putText(frame, self._blabel, (x1+5, y1-5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 2)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = ctk.CTkImage(
-                light_image=Image.fromarray(rgb),
-                dark_image =Image.fromarray(rgb),
-                size=CAM_DISPLAY)
-            self.video_label.configure(image=img, text="")
+            img = ctk.CTkImage(light_image=Image.fromarray(rgb),
+                               dark_image=Image.fromarray(rgb), size=CAM_DISPLAY)
+            self.lbl_cam.configure(image=img, text="")
 
-        # QUAN TRỌNG: luôn schedule lần tiếp theo dù frame=None hay không
-        # Bug cũ: chỉ gọi after() bên trong if frame is not None → vòng lặp tắt khi frame trống
-        self.after(15, self._update_loop)
+        # Luôn schedule kể cả khi frame=None
+        self.after(15, self._loop)
 
-    def _handle_result(self, result: dict):
-        status = result.get("status")
+    def _handle(self, r: dict):
+        s = r.get("status")
 
-        if status == "no_face":
+        if s == "no_face":
             self._bbox = None
-            self.lbl_result.configure(text="---", text_color=C_DIM)
-            self.lbl_live_hint.configure(text=result.get("msg", ""), text_color=C_DIM)
+            self.lbl_result.configure(text="---", text_color=DIM)
+            self.lbl_hint.configure(text=r.get("msg",""), text_color=DIM)
 
-        elif status == "liveness":
-            self._bbox      = result["bbox"]
-            self._box_color = (0, 165, 255)
-            self._box_label = result["msg"]
-            self.lbl_result.configure(text="Đang xác thực...", text_color=C_ORANGE)
-            self.lbl_live_hint.configure(text=result["msg"], text_color=C_ORANGE)
+        elif s == "liveness":
+            self._bbox, self._bcolor, self._blabel = r["bbox"], (0,165,255), r["msg"]
+            self.lbl_result.configure(text="Đang xác thực...", text_color=ORANGE)
+            self.lbl_hint.configure(text=r["msg"], text_color=ORANGE)
 
-        elif status == "empty_db":
-            self._bbox      = result["bbox"]
-            self._box_color = (0, 215, 255)
-            self._box_label = "Chua co NV"
-            self.lbl_result.configure(text="Chưa có nhân viên!", text_color=C_ORANGE)
-            # Reset để người tiếp theo có thể quét ngay
-            self.recognizer.reset_liveness()
+        elif s == "empty_db":
+            self._bbox, self._bcolor, self._blabel = r["bbox"], (0,215,255), "Chua co NV"
+            self.lbl_result.configure(text="Chưa có nhân viên!", text_color=ORANGE)
+            self.after(200, self.rec.reset_liveness)
 
-        elif status == "recognized":
-            name = result["name"]
-            conf = result["confidence"]
-            role = result.get("role", "")
-            self._bbox      = result["bbox"]
-            self._box_color = (16, 185, 129)
-            self._box_label = f"{name} ({conf}%)"
-
-            log = self.logger.try_log(name, conf, role)
-            if log:
-                event    = log["event"]
-                icon     = "✅ VÀO" if event == "CHECK_IN" else "🚪 RA"
-                color    = C_GREEN if event == "CHECK_IN" else C_ORANGE
-                role_txt = f"\n[{role}]" if role else ""
-                self.lbl_result.configure(
-                    text=f"{icon}\n{name}{role_txt}", text_color=color)
-                self.lbl_status.configure(
-                    text=f"{icon}  {name}  {log['time']}", text_color=color)
-                self.lbl_live_hint.configure(text="", text_color="white")
-                self._today_log.insert(0, {**log, "role": role})
-                if not self._log_refresh_pending:
-                    self._log_refresh_pending = True
-                    self.after(50, self._deferred_refresh)
+        elif s == "recognized":
+            name, conf, role = r["name"], r["confidence"], r.get("role","")
+            self._bbox = r["bbox"]
+            self._bcolor = (16,185,129)
+            self._blabel = f"{name} ({conf}%)"
+            entry = self.log.try_log(name, conf, role)
+            if entry:
+                icon  = "✅ VÀO" if entry["event"]=="CHECK_IN" else "🚪 RA"
+                color = GREEN if entry["event"]=="CHECK_IN" else ORANGE
+                label = f"{icon}\n{name}" + (f"\n[{role}]" if role else "")
+                self.lbl_result.configure(text=label, text_color=color)
+                self._status(f"{icon}  {name}  {entry['time']}", color)
+                self.lbl_hint.configure(text="", text_color="white")
+                self._log_today.insert(0, {**entry, "role": role})
+                if not self._log_dirty:
+                    self._log_dirty = True
+                    self.after(80, self._refresh_log)
             else:
-                # Trong cooldown — hiện tên nhưng không ghi log
-                self.lbl_result.configure(text=f"✅ {name}", text_color=C_GREEN)
+                self.lbl_result.configure(text=f"✅ {name}", text_color=GREEN)
+            self.after(300, self.rec.reset_liveness)
 
-            # Reset liveness SAU KHI đã xử lý xong
-            # Dùng after(200ms) để AI worker không nhận lại kết quả cũ ngay lập tức
-            self.after(200, self.recognizer.reset_liveness)
+        elif s == "unknown":
+            self._bbox, self._bcolor, self._blabel = r["bbox"], (239,68,68), "Nguoi la"
+            self.lbl_result.configure(text="❌ Không nhận ra", text_color=RED)
+            self.after(500, self.rec.reset_liveness)
 
-        elif status == "unknown":
-            self._bbox      = result["bbox"]
-            self._box_color = (239, 68, 68)
-            self._box_label = "Nguoi la"
-            self.lbl_result.configure(text="❌ Không nhận ra", text_color=C_RED)
-            # Reset để người khác có thể thử ngay
-            self.after(500, self.recognizer.reset_liveness)
+    # -- Camera --
 
-    def _deferred_refresh(self):
-        """Được gọi sau 50ms — lúc này frame đã vẽ xong, an toàn để rebuild widget."""
-        self._log_refresh_pending = False
-        self._refresh_log_panel()
-        self.lbl_today_count.configure(text=str(len(self._today_log)))
-
-    # ── Camera ───────────────────────────────────────────────────────────
-
-    def _toggle_camera(self):
-        if not self.recognizer._is_running:
-            ok = self.recognizer.start_camera()
-            if not ok:
-                self._set_status("❌ Không tìm thấy Camera!", C_RED)
-                return
+    def _toggle_cam(self):
+        if not self.rec.is_running:
+            if not self.rec.start_camera():
+                self._status("❌ Không tìm thấy Camera!", RED); return
             self._bbox = None
-            self.btn_power.configure(text="⏹  TẮT CAMERA", fg_color=C_RED,
-                                     hover_color="#b91c1c")
-            self._set_status("Camera đang hoạt động", C_GREEN)
-            self.lbl_result.configure(text="Nhúc nhích đầu để chấm công",
-                                      text_color=C_ACCENT)
-            self._indicator.configure(text="● ĐANG HOẠT ĐỘNG", text_color=C_GREEN)
-            self._update_loop()
+            self.btn_cam.configure(text="⏹  TẮT CAMERA", fg_color=RED, hover_color="#b91c1c")
+            self._indicator.configure(text="● ĐANG HOẠT ĐỘNG", text_color=GREEN)
+            self._status("Camera đang hoạt động", GREEN)
+            self.lbl_result.configure(text="Nhuc nhich dau de cham cong", text_color=BLUE)
+            self._loop()
         else:
-            self.recognizer.stop_camera()
+            self.rec.stop_camera()
             self._bbox = None
-            self.btn_power.configure(text="▶  BẬT CAMERA", fg_color=C_GREEN,
-                                     hover_color="#059669")
-            self._set_status("Camera đã tắt", C_DIM)
-            self._indicator.configure(text="● ĐÃ TẮT", text_color=C_DIM)
-            self.video_label.configure(
-                image=None,
+            self.btn_cam.configure(text="▶  BẬT CAMERA", fg_color=GREEN, hover_color="#059669")
+            self._indicator.configure(text="● ĐÃ TẮT", text_color=DIM)
+            self._status("Camera đã tắt", DIM)
+            self.lbl_cam.configure(image=None,
                 text="📷\n\nHệ thống đang tắt\nBấm  ▶ BẬT CAMERA  để bắt đầu")
 
-    # ── Đăng ký nhân viên (có thêm chức vụ) ─────────────────────────────
+    # -- Đăng ký --
 
     def _open_register(self):
-        was_running = self.recognizer._is_running
-        if was_running:
-            self.recognizer._is_running = False
+        was = self.rec.is_running
+        if was: self.rec.is_running = False
 
-        def on_done(name: str, role: str, dept: str, emb: np.ndarray):
+        def done(name, role, dept, emb):
             self.db[name] = {"emb": emb, "role": role, "dept": dept}
             self._save_db()
-            self.recognizer.set_db(self.db)
-            self._set_status(f"✅ Đã thêm: {name} [{role}]", C_GREEN)
-            self._refresh_employee_count()
-            if was_running:
-                self.recognizer._is_running = True
-                self._set_status("Camera đang hoạt động", C_GREEN)
+            self.rec.set_db(self.db)
+            self._status(f"✅ Đã thêm: {name} [{role}]", GREEN)
+            self.lbl_emp.configure(text=str(len(self.db)))
+            if was:
+                self.rec.is_running = True
+                self._status("Camera đang hoạt động", GREEN)
 
-        RegisterWindow(
-            parent=self,
-            face_app=self.recognizer._face_app,
-            existing_names=list(self.db.keys()),
-            on_done=on_done)
+        RegisterWindow(self, self.rec._app, list(self.db.keys()), done)
+
 
     # ── Danh sách nhân viên ──────────────────────────────────────────────
 
