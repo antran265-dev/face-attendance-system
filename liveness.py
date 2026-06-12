@@ -52,7 +52,9 @@ class LivenessDetector:
             if len(self.history) >= 8:
                 var = float(np.var(self.history[-12:]))
                 if var < MOTION_MIN_VARIANCE and self.cum_motion < MOTION_THRESHOLD * 1.3:
-                    self.prev_center = None
+                    # Không reset prev_center (tránh kẹt vô hạn) — chỉ yêu cầu
+                    # tích lũy thêm motion để tăng variance/vượt 1.3x ngưỡng
+                    self.history = []
                     return False, "Di chuyen tu nhien hon"
             self.passed = True
             return True, "THAT"
