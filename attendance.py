@@ -1,12 +1,24 @@
 from __future__ import annotations
-import csv, os, subprocess, sys, threading, time
+"""
+attendance.py — Logic chấm công, giờ dùng Database (SQLAlchemy) thay cho CSV.
+
+THAY ĐỔI SO VỚI BẢN CŨ:
+  - get_event() đọc lịch sử từ DB thay vì đọc file CSV dòng-by-dòng
+  - try_log() ghi vào DB thay vì append CSV
+  - API (tên hàm, tham số, kết quả trả về) giữ NGUYÊN — main.py không cần sửa gì
+
+Âm thanh giữ nguyên cơ chế subprocess cũ.
+"""
+
+import subprocess, sys, threading, time
 from datetime import datetime
 from pathlib import Path
-from config import LOG_PATH, SCAN_COOLDOWN, CHECK_OUT_HOUR, EDGE_VOICE, MSG_CHECKIN, MSG_CHECKOUT
+from config import SCAN_COOLDOWN, CHECK_OUT_HOUR, EDGE_VOICE, MSG_CHECKIN, MSG_CHECKOUT
+from db_repository import add_attendance_log, get_today_logs_for
 
 
 # ---------------------------------------------------------------------------
-# Âm thanh — subprocess riêng, không đụng GIL/Tkinter
+# Âm thanh — subprocess riêng, không đụng GIL/Tkinter (giữ nguyên bản cũ)
 # ---------------------------------------------------------------------------
 
 def _detect_engine() -> str:
@@ -21,8 +33,8 @@ def _detect_engine() -> str:
     print("⚠️  Không có âm thanh — pip install edge-tts")
     return "none"
 
-ENGINE    = _detect_engine()
-_sem      = threading.Semaphore(1)   # chỉ 1 câu chạy cùng lúc
+ENGINE = _detect_engine()
+_sem   = threading.Semaphore(1)
 
 _PLAY = """
 import sys, os, tempfile
@@ -69,7 +81,7 @@ def speak(text: str, event: str = "CHECK_IN"):
         actual = "sounds/checkin.mp3" if event == "CHECK_IN" else "sounds/checkout.mp3"
 
     if not _sem.acquire(blocking=False):
-        return   # đang phát câu khác, bỏ qua
+        return
 
     def _run():
         try:
@@ -89,36 +101,35 @@ def speak(text: str, event: str = "CHECK_IN"):
 
 
 # ---------------------------------------------------------------------------
-# Xác định loại sự kiện
+# Xác định loại sự kiện — ĐỌC TỪ DATABASE thay vì CSV
 # ---------------------------------------------------------------------------
 
 def get_event(name: str) -> str:
-    today = datetime.now().date().isoformat()
-    hour  = datetime.now().hour
-    has_in = has_out = False
+    """
+    Trả về CHECK_IN hoặc CHECK_OUT dựa trên giờ hiện tại và lịch sử hôm nay.
+    Logic giữ nguyên 100% so với bản CSV cũ, chỉ đổi nguồn dữ liệu sang DB.
+    """
+    hour = datetime.now().hour
 
-    if os.path.exists(LOG_PATH):
-        with open(LOG_PATH, "r", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                if row.get("Ten") != name: continue
-                try:
-                    d = datetime.strptime(row["Thoi gian"], "%d/%m/%Y %H:%M:%S").date().isoformat()
-                except Exception: continue
-                if d != today: continue
-                if row.get("Su kien") == "CHECK_IN":  has_in  = True
-                if row.get("Su kien") == "CHECK_OUT": has_out = True
+    today_logs = get_today_logs_for(name)   # <-- đây là điểm khác biệt duy nhất
+    has_in  = any(l["event"] == "CHECK_IN"  for l in today_logs)
+    has_out = any(l["event"] == "CHECK_OUT" for l in today_logs)
 
     if hour < CHECK_OUT_HOUR: return "CHECK_IN"
     if not has_in:            return "CHECK_IN"
-    if has_out:               return "CHECK_IN"
+    if has_out:                return "CHECK_IN"
     return "CHECK_OUT"
 
 
 # ---------------------------------------------------------------------------
-# Ghi log
+# Ghi log — GHI VÀO DATABASE thay vì CSV
 # ---------------------------------------------------------------------------
 
 class AttendanceLogger:
+    """
+    API giữ nguyên hoàn toàn so với bản cũ — main.py gọi try_log() như trước,
+    không cần sửa gì ở phía UI.
+    """
 
     def __init__(self):
         self._last: dict[str, float] = {}
@@ -130,19 +141,17 @@ class AttendanceLogger:
 
         self._last[name] = now
         event = get_event(name)
-        dt    = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        self._write(name, event, dt, conf, role)
-        self._say(name, event)
-        return {"name": name, "event": event, "time": dt}
 
-    def _write(self, name, event, dt, conf, role):
-        exists = os.path.isfile(LOG_PATH)
-        with open(LOG_PATH, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            if not exists:
-                w.writerow(["Ten", "Chuc vu", "Su kien", "Thoi gian", "Do chinh xac (%)"])
-            w.writerow([name, role, event, dt, conf])
-        print(f"  {'✅ VÀO' if event=='CHECK_IN' else '🚪 RA'}  {name} [{role}]  {dt}")
+        result = add_attendance_log(name, event, conf)   # <-- ghi vào DB
+        if result is None:
+            print(f"⚠️  Không tìm thấy nhân viên '{name}' trong DB để ghi log.")
+            return None
+
+        icon = "✅ VÀO" if event == "CHECK_IN" else "🚪 RA"
+        print(f"  {icon}  {name} [{role}]  {result['time']}")
+
+        self._say(name, event)
+        return result
 
     def _say(self, name, event):
         msg = MSG_CHECKIN if event == "CHECK_IN" else MSG_CHECKOUT

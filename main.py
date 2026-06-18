@@ -1,14 +1,19 @@
 from __future__ import annotations
-import csv, os, pickle
+import csv, os
 import cv2, numpy as np
 import customtkinter as ctk
 from PIL import Image
 from datetime import datetime
 
-from config import DB_PATH, LOG_PATH, CAM_DISPLAY
+from config import CAM_DISPLAY
 from recognizer import FaceRecognizer
 from attendance import AttendanceLogger
 from ui_register import RegisterWindow
+from models import init_db
+from db_repository import (
+    add_employee, delete_employee, get_all_employees,
+    get_employee_count, get_today_all_logs, get_logs_by_date_range,
+)
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -23,6 +28,7 @@ RED    = "#ef4444"
 ORANGE = "#f59e0b"
 DIM    = "#6b7280"
 
+
 class App(ctk.CTk):
 
     def __init__(self):
@@ -32,7 +38,8 @@ class App(ctk.CTk):
         self.minsize(1100, 680)
         self.configure(fg_color=BG)
 
-        self.db   = self._load_db()
+        init_db()                          # tạo file database.db nếu chưa có
+        self.db   = get_all_employees()    # nạp cache từ DB vào RAM (giống cũ)
         self.rec  = FaceRecognizer()
         self.log  = AttendanceLogger()
 
@@ -49,9 +56,9 @@ class App(ctk.CTk):
         self.after(200, self._init)
         self.after(1000, self._tick)
 
-    # ── Khởi tạo AI ──────────────────────────────────────────────────────
+    # -- Khởi tạo --
 
-     def _init(self):
+    def _init(self):
         try:
             self.rec.load_model()
             self.rec.set_db(self.db)
@@ -168,399 +175,304 @@ class App(ctk.CTk):
         if was: self.rec.is_running = False
 
         def done(name, role, dept, emb):
-            self.db[name] = {"emb": emb, "role": role, "dept": dept}
-            self._save_db()
-            self.rec.set_db(self.db)
-            self._status(f"✅ Đã thêm: {name} [{role}]", GREEN)
-            self.lbl_emp.configure(text=str(len(self.db)))
-            if was:
-                self.rec.is_running = True
-                self._status("Camera đang hoạt động", GREEN)
+            try:
+                ok = add_employee(name, role, dept, emb)   # ghi vào DB ngay
+                if not ok:
+                    self._status(f"❌ Tên '{name}' đã tồn tại trong DB!", RED)
+                    return
+                self.db[name] = {"emb": emb, "role": role, "dept": dept}   # cập nhật cache RAM
+                self.rec.set_db(self.db)
+                self._status(f"✅ Đã thêm: {name} [{role}]", GREEN)
+                self.lbl_emp.configure(text=str(len(self.db)))
+            except Exception as e:
+                import traceback
+                print("❌ LỖI khi lưu nhân viên vào DB:")
+                traceback.print_exc()
+                self._status(f"❌ Lỗi lưu DB: {e}", RED)
+            finally:
+                if was:
+                    self.rec.is_running = True
+                    self._status("Camera đang hoạt động", GREEN)
 
         RegisterWindow(self, self.rec._app, list(self.db.keys()), done)
 
+    # -- Danh sách nhân viên --
 
-    # ── Danh sách nhân viên ──────────────────────────────────────────────
-
-    def _open_employee_list(self):
+    def _open_list(self):
         win = ctk.CTkToplevel(self)
         win.title("DANH SÁCH NHÂN VIÊN")
         win.geometry("500x600")
         win.resizable(False, False)
         win.grab_set()
-        win.configure(fg_color=C_PANEL)
+        win.configure(fg_color=PANEL)
 
         ctk.CTkLabel(win, text="👥  DANH SÁCH NHÂN VIÊN",
-                     font=("Arial", 18, "bold"), text_color="white").pack(pady=(18, 2))
+                     font=("Arial", 18, "bold")).pack(pady=(16, 2))
+        ctk.CTkLabel(win, text=f"Tổng: {len(self.db)} nhân viên",
+                     font=("Arial", 12), text_color=DIM).pack(pady=(0, 8))
 
-        # Thống kê theo chức vụ
-        roles = {}
-        for nm, val in self.db.items():
-            r = val["role"] if isinstance(val, dict) else "Chưa phân loại"
-            roles[r] = roles.get(r, 0) + 1
-        role_str = "  |  ".join(f"{r}: {c}" for r, c in roles.items())
-        ctk.CTkLabel(win, text=role_str or "Chưa có nhân viên",
-                     font=("Arial", 11), text_color=C_ACCENT).pack(pady=(0, 10))
+        # Bộ lọc theo chức vụ
+        filter_frame = ctk.CTkFrame(win, fg_color="transparent")
+        filter_frame.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(filter_frame, text="Lọc:", font=("Arial", 12)).pack(side="left")
 
-        # Bộ lọc chức vụ
-        all_roles = ["Tất cả"] + sorted(set(
-            (v["role"] if isinstance(v, dict) else "Chưa phân loại")
-            for v in self.db.values()
-        ))
+        from config import ROLE_OPTIONS
         filter_var = ctk.StringVar(value="Tất cả")
+        scroll = ctk.CTkScrollableFrame(win, fg_color=CARD, height=380, corner_radius=10)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
-        filter_row = ctk.CTkFrame(win, fg_color="transparent")
-        filter_row.pack(fill="x", padx=18, pady=(0, 8))
-        ctk.CTkLabel(filter_row, text="Lọc:", font=("Arial", 12),
-                     text_color=C_DIM).pack(side="left")
-        filter_menu = ctk.CTkOptionMenu(
-            filter_row, values=all_roles, variable=filter_var,
-            width=180, fg_color=C_CARD, button_color=C_ACCENT,
-            command=lambda _: rebuild_list())
-        filter_menu.pack(side="left", padx=8)
+        def refresh_list(choice="Tất cả"):
+            for w in scroll.winfo_children(): w.destroy()
+            items = [(n, v) for n, v in sorted(self.db.items())
+                     if choice == "Tất cả" or
+                     (isinstance(v, dict) and v.get("role","") == choice)]
+            if not items:
+                ctk.CTkLabel(scroll, text="Không có nhân viên nào.",
+                             text_color=DIM, font=("Arial", 13)).pack(pady=20); return
+            for i, (nm, v) in enumerate(items):
+                role = v.get("role","") if isinstance(v, dict) else ""
+                dept = v.get("dept","") if isinstance(v, dict) else ""
+                tag  = f"  {i+1:02d}.  👤  {nm}"
+                if role: tag += f"  —  {role}"
+                b = ctk.CTkButton(scroll, text=tag, height=42, font=("Arial", 12),
+                                  fg_color=PANEL, hover_color=BLUE, anchor="w",
+                                  command=lambda n=nm: selected.update({"name": n})
+                                      or lbl_sel.configure(text=f"Đã chọn: {n}", text_color="cyan")
+                                      or [bx.configure(fg_color=BLUE if bx.cget("text").strip().endswith(n) or n in bx.cget("text") else PANEL) for bx in scroll.winfo_children() if isinstance(bx, ctk.CTkButton)])
+                b.pack(fill="x", pady=2, padx=4)
 
-        scroll   = ctk.CTkScrollableFrame(win, fg_color=C_CARD,
-                                          height=360, corner_radius=10)
-        scroll.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+        ctk.CTkOptionMenu(filter_frame, values=["Tất cả"] + ROLE_OPTIONS,
+                          width=200, command=refresh_list).pack(side="left", padx=8)
         selected = {"name": None}
-        btn_refs = {}
-
-        def select(n: str):
-            selected["name"] = n
-            for k, b in btn_refs.items():
-                b.configure(fg_color=C_ACCENT if k == n else C_PANEL)
-            lbl_sel.configure(text=f"Đã chọn: {n}", text_color="cyan")
-
-        def rebuild_list():
-            for w in scroll.winfo_children():
-                w.destroy()
-            btn_refs.clear()
-            chosen_role = filter_var.get()
-            filtered = {
-                nm: val for nm, val in self.db.items()
-                if chosen_role == "Tất cả" or
-                   (val["role"] if isinstance(val, dict) else "Chưa phân loại") == chosen_role
-            }
-            if not filtered:
-                ctk.CTkLabel(scroll, text="Không có nhân viên.",
-                             text_color=C_DIM, font=("Arial", 12)).pack(pady=20)
-                return
-            for i, (nm, val) in enumerate(sorted(filtered.items())):
-                role = val["role"] if isinstance(val, dict) else "?"
-                row  = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=8, height=46)
-                row.pack(fill="x", pady=3, padx=4)
-                row.pack_propagate(False)
-                b = ctk.CTkButton(
-                    row, text=f"  {i+1:02d}.  👤  {nm}",
-                    font=("Arial", 13), fg_color="transparent",
-                    hover_color=C_ACCENT, anchor="w",
-                    command=lambda n=nm: select(n))
-                b.pack(side="left", fill="both", expand=True)
-                ctk.CTkLabel(row, text=role, font=("Arial", 11),
-                             text_color=C_ACCENT, width=110).pack(side="right", padx=10)
-                btn_refs[nm] = b
-
-        rebuild_list()
-
-        lbl_sel = ctk.CTkLabel(win, text="Chưa chọn ai",
-                               font=("Arial", 12), text_color=C_DIM)
+        lbl_sel = ctk.CTkLabel(win, text="Chưa chọn ai", font=("Arial", 12), text_color=DIM)
         lbl_sel.pack(pady=(0, 6))
 
         def do_delete():
             nm = selected["name"]
-            if not nm:
-                lbl_sel.configure(text="⚠ Hãy chọn 1 nhân viên!", text_color=C_ORANGE)
-                return
-            dlg = ctk.CTkInputDialog(
-                text=f"Nhập tên '{nm}' để xác nhận xóa:",
-                title="Xác nhận xóa")
-            val = dlg.get_input()
-            if val and val.strip() == nm:
-                del self.db[nm]
-                self._save_db()
-                self.recognizer.set_db(self.db)
-                self._set_status(f"Đã xóa: {nm}", C_ORANGE)
-                self._refresh_employee_count()
+            if not nm: lbl_sel.configure(text="⚠ Chọn 1 nhân viên trước!", text_color=ORANGE); return
+            dlg = ctk.CTkInputDialog(text=f"Nhập tên '{nm}' để xác nhận:", title="Xóa nhân viên")
+            if dlg.get_input() and dlg.get_input().strip() == nm:
+                delete_employee(nm)               # xóa khỏi DB
+                del self.db[nm]                    # xóa khỏi cache RAM
+                self.rec.set_db(self.db)
+                self._status(f"Đã xóa: {nm}", ORANGE)
+                self.lbl_emp.configure(text=str(len(self.db)))
                 win.destroy()
             else:
-                lbl_sel.configure(text="❌ Tên không khớp.", text_color=C_RED)
+                lbl_sel.configure(text="❌ Tên không khớp.", text_color=RED)
 
-        ctk.CTkButton(
-            win, text="🗑  XÓA NHÂN VIÊN ĐÃ CHỌN", height=42,
-            font=("Arial", 13, "bold"), fg_color="#7a2020", hover_color="#9a3030",
-            command=do_delete
-        ).pack(fill="x", padx=18, pady=(0, 16))
+        ctk.CTkButton(win, text="🗑  XÓA NHÂN VIÊN ĐÃ CHỌN", height=44,
+                      font=("Arial", 13, "bold"), fg_color="#7a2020", hover_color="#9a3030",
+                      command=do_delete).pack(fill="x", padx=16, pady=(0, 16))
+        refresh_list()
 
-    # ── Log ──────────────────────────────────────────────────────────────
+    # -- Log --
 
     def _open_log(self):
-        if not os.path.exists(LOG_PATH):
-            self._set_status("Chưa có log nào.", C_ORANGE)
+        """
+        Xuất toàn bộ log từ Database ra file CSV (vì giờ dữ liệu nằm trong DB,
+        không còn ghi trực tiếp vào CSV nữa), rồi mở file đó lên cho người dùng xem.
+        """
+        from datetime import datetime as _dt
+        logs = get_logs_by_date_range(_dt(2000, 1, 1), _dt(2100, 1, 1))   # lấy toàn bộ
+
+        if not logs:
+            self._status("Chưa có log chấm công nào trong DB.", ORANGE)
             return
+
+        export_path = os.path.join("database", "attendance_export.csv")
         try:
-            os.startfile(LOG_PATH)
+            with open(export_path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(["Ten", "Chuc vu", "Phong ban", "Su kien", "Thoi gian", "Do chinh xac (%)"])
+                for l in logs:
+                    w.writerow([
+                        l["name"], l["role"], l["dept"], l["event"],
+                        l["timestamp"].strftime("%d/%m/%Y %H:%M:%S"), l["confidence"]
+                    ])
+        except Exception as e:
+            self._status(f"❌ Lỗi xuất log: {e}", RED)
+            return
+
+        self._status(f"Đã xuất {len(logs)} dòng log → {export_path}", GREEN)
+        try:
+            os.startfile(export_path)
         except AttributeError:
-            os.system(f"xdg-open '{LOG_PATH}'")
+            os.system(f"xdg-open '{export_path}'")
 
-    def _refresh_today_log(self):
-        today = datetime.now().date().isoformat()
-        self._today_log = []
-        if not os.path.exists(LOG_PATH):
-            self._refresh_log_panel()
-            return
-        try:
-            with open(LOG_PATH, "r", encoding="utf-8-sig") as f:
-                for row in csv.DictReader(f):
-                    try:
-                        d = datetime.strptime(
-                            row["Thoi gian"], "%d/%m/%Y %H:%M:%S"
-                        ).date().isoformat()
-                        if d == today:
-                            self._today_log.append({
-                                "name":  row["Ten"],
-                                "event": row.get("Su kien", "CHECK_IN"),
-                                "time":  row["Thoi gian"],
-                                "role":  row.get("Chuc vu", ""),
-                            })
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        self._today_log.reverse()
-        self._refresh_log_panel()
-        self.lbl_today_count.configure(text=str(len(self._today_log)))
+    def _load_today_log(self):
+        """Đọc log hôm nay từ Database thay vì file CSV."""
+        self._log_today = get_today_all_logs()    # đã sắp xếp mới nhất trước, có sẵn name/role/event/time
+        self._refresh_log()
 
-    def _refresh_log_panel(self):
-        for w in self.log_scroll.winfo_children():
-            w.destroy()
-        if not self._today_log:
+    def _refresh_log(self):
+        self._log_dirty = False
+        for w in self.log_scroll.winfo_children(): w.destroy()
+        count = len(self._log_today)
+        self.lbl_today.configure(text=str(count))
+        if not self._log_today:
             ctk.CTkLabel(self.log_scroll, text="Chưa có dữ liệu hôm nay",
-                         font=("Arial", 11), text_color=C_DIM).pack(pady=16)
-            return
-        for entry in self._today_log[:40]:
-            event    = entry.get("event", "")
-            icon     = "↗" if event == "CHECK_IN" else "↙"
-            color    = C_GREEN if event == "CHECK_IN" else C_ORANGE
-            time_only = entry["time"].split(" ")[1] if " " in entry["time"] else entry["time"]
-            role     = entry.get("role", "")
+                         font=("Arial", 11), text_color=DIM).pack(pady=16); return
+        for e in self._log_today[:40]:
+            is_in  = e.get("event") == "CHECK_IN"
+            color  = GREEN if is_in else ORANGE
+            icon   = "↗" if is_in else "↙"
+            t_only = e["time"].split(" ")[1] if " " in e["time"] else e["time"]
+            row = ctk.CTkFrame(self.log_scroll, fg_color=PANEL, corner_radius=6, height=36)
+            row.pack(fill="x", pady=2, padx=4)
+            row.pack_propagate(False)
+            ctk.CTkLabel(row, text=icon, font=("Arial", 14, "bold"),
+                         text_color=color, width=24).pack(side="left", padx=(8,4))
+            ctk.CTkLabel(row, text=e["name"], font=("Arial", 11, "bold"),
+                         text_color="white", anchor="w").pack(side="left", expand=True, fill="x")
+            ctk.CTkLabel(row, text=t_only, font=("Arial", 11),
+                         text_color=DIM, width=60).pack(side="right", padx=8)
 
-            row_f = ctk.CTkFrame(self.log_scroll, fg_color=C_PANEL,
-                                 corner_radius=6, height=40)
-            row_f.pack(fill="x", pady=2, padx=4)
-            row_f.pack_propagate(False)
+    # -- Helpers --
 
-            ctk.CTkLabel(row_f, text=icon,
-                         font=("Arial", 14, "bold"),
-                         text_color=color, width=22).pack(side="left", padx=(8, 2))
-            name_col = ctk.CTkFrame(row_f, fg_color="transparent")
-            name_col.pack(side="left", fill="both", expand=True)
-            ctk.CTkLabel(name_col, text=entry["name"],
-                         font=("Arial", 11, "bold"),
-                         text_color="white", anchor="w").pack(fill="x")
-            if role:
-                ctk.CTkLabel(name_col, text=role,
-                             font=("Arial", 9), text_color=C_ACCENT,
-                             anchor="w").pack(fill="x")
-            ctk.CTkLabel(row_f, text=time_only,
-                         font=("Arial", 11), text_color=C_DIM,
-                         width=58).pack(side="right", padx=8)
+    def _status(self, text, color): self.lbl_status.configure(text=text, text_color=color)
 
-    def _refresh_employee_count(self):
-        self.lbl_emp_count.configure(text=str(len(self.db)))
+    # -- Build UI --
 
-    # ── Helpers ──────────────────────────────────────────────────────────
-
-    def _set_status(self, text: str, color: str):
-        self.lbl_status.configure(text=text, text_color=color)
-
-    def _load_db(self) -> dict:
-        if os.path.exists(DB_PATH):
-            try:
-                with open(DB_PATH, "rb") as f:
-                    data = pickle.load(f)
-                # Migration: nếu DB cũ (chỉ lưu embedding), tự động nâng cấp
-                migrated = {}
-                for k, v in data.items():
-                    if isinstance(v, np.ndarray):
-                        migrated[k] = {"emb": v, "role": "Chưa phân loại"}
-                    else:
-                        migrated[k] = v
-                return migrated
-            except Exception:
-                pass
-        return {}
-
-    def _save_db(self):
-        with open(DB_PATH, "wb") as f:
-            pickle.dump(self.db, f)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # UI SETUP
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _setup_ui(self):
+    def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=0)
         self.grid_rowconfigure(1, weight=1)
 
-        # ── HEADER ───────────────────────────────────────────────────────
-        header = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=0, height=64)
-        header.grid(row=0, column=0, columnspan=2, sticky="ew")
-        header.grid_propagate(False)
-        header.grid_columnconfigure(1, weight=1)
+        # Header
+        hdr = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=64)
+        hdr.grid(row=0, column=0, columnspan=2, sticky="ew")
+        hdr.grid_propagate(False)
+        hdr.grid_columnconfigure(1, weight=1)
 
-        logo_f = ctk.CTkFrame(header, fg_color="transparent")
-        logo_f.grid(row=0, column=0, padx=20, pady=8, sticky="w")
-        ctk.CTkLabel(logo_f, text="⬡", font=("Arial", 28),
-                     text_color=C_ACCENT).pack(side="left", padx=(0, 8))
-        t_col = ctk.CTkFrame(logo_f, fg_color="transparent")
-        t_col.pack(side="left")
-        ctk.CTkLabel(t_col, text="HỆ THỐNG CHẤM CÔNG AI",
+        logo = ctk.CTkFrame(hdr, fg_color="transparent")
+        logo.grid(row=0, column=0, padx=24, pady=8, sticky="w")
+        ctk.CTkLabel(logo, text="⬡", font=("Arial", 28), text_color=BLUE).pack(side="left", padx=(0,8))
+        col = ctk.CTkFrame(logo, fg_color="transparent")
+        col.pack(side="left")
+        ctk.CTkLabel(col, text="HỆ THỐNG CHẤM CÔNG AI",
                      font=("Arial", 16, "bold"), text_color="white").pack(anchor="w")
-        ctk.CTkLabel(t_col, text="Face Recognition Attendance System",
-                     font=("Arial", 10), text_color=C_DIM).pack(anchor="w")
+        ctk.CTkLabel(col, text="Face Recognition Attendance",
+                     font=("Arial", 10), text_color=DIM).pack(anchor="w")
 
-        self._indicator = ctk.CTkLabel(header, text="● ĐÃ TẮT",
-                                       font=("Arial", 12, "bold"), text_color=C_DIM)
+        self._indicator = ctk.CTkLabel(hdr, text="● ĐÃ TẮT",
+                                       font=("Arial", 12, "bold"), text_color=DIM)
         self._indicator.grid(row=0, column=1)
 
-        clk_f = ctk.CTkFrame(header, fg_color="transparent")
-        clk_f.grid(row=0, column=2, padx=20, sticky="e")
-        self.lbl_clock = ctk.CTkLabel(clk_f, text="00:00:00",
-                                      font=("Arial", 22, "bold"), text_color=C_ACCENT)
+        clk = ctk.CTkFrame(hdr, fg_color="transparent")
+        clk.grid(row=0, column=2, padx=24, sticky="e")
+        self.lbl_clock = ctk.CTkLabel(clk, text="00:00:00",
+                                      font=("Arial", 22, "bold"), text_color=BLUE)
         self.lbl_clock.pack()
-        self.lbl_date = ctk.CTkLabel(clk_f, text="",
-                                     font=("Arial", 10), text_color=C_DIM)
+        self.lbl_date = ctk.CTkLabel(clk, text="", font=("Arial", 10), text_color=DIM)
         self.lbl_date.pack()
 
-        # ── BODY ─────────────────────────────────────────────────────────
+        # Body
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=12, pady=12)
         body.grid_columnconfigure(0, weight=3)
         body.grid_columnconfigure(1, weight=0)
         body.grid_rowconfigure(0, weight=1)
 
-        # ── CAMERA ───────────────────────────────────────────────────────
-        cam_wrap = ctk.CTkFrame(body, fg_color=C_PANEL, corner_radius=16)
-        cam_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        # Camera
+        cam_wrap = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=16)
+        cam_wrap.grid(row=0, column=0, sticky="nsew", padx=(0,8))
         cam_wrap.grid_rowconfigure(1, weight=1)
         cam_wrap.grid_columnconfigure(0, weight=1)
 
-        cam_top = ctk.CTkFrame(cam_wrap, fg_color=C_CARD, corner_radius=0, height=38)
-        cam_top.grid(row=0, column=0, sticky="ew")
-        cam_top.grid_propagate(False)
-        ctk.CTkLabel(cam_top, text="  📷  CAMERA NHẬN DIỆN",
-                     font=("Arial", 12, "bold"), text_color=C_DIM).pack(
-                         side="left", padx=12, pady=8)
+        top_bar = ctk.CTkFrame(cam_wrap, fg_color=CARD, corner_radius=0, height=38)
+        top_bar.grid(row=0, column=0, sticky="ew")
+        top_bar.grid_propagate(False)
+        ctk.CTkLabel(top_bar, text="  📷  CAMERA NHẬN DIỆN",
+                     font=("Arial", 12, "bold"), text_color=DIM).pack(side="left", padx=12, pady=8)
 
-        self.video_label = ctk.CTkLabel(
-            cam_wrap,
+        self.lbl_cam = ctk.CTkLabel(cam_wrap,
             text="📷\n\nHệ thống đang tắt\nBấm  ▶ BẬT CAMERA  để bắt đầu",
-            font=("Arial", 16), text_color=C_DIM)
-        self.video_label.grid(row=1, column=0, padx=12, pady=12, sticky="nsew")
+            font=("Arial", 16), text_color=DIM)
+        self.lbl_cam.grid(row=1, column=0, padx=12, pady=12, sticky="nsew")
 
-        self.lbl_live_hint = ctk.CTkLabel(
-            cam_wrap, text="", font=("Arial", 13), text_color=C_ORANGE)
-        self.lbl_live_hint.grid(row=2, column=0, pady=(0, 10))
+        self.lbl_hint = ctk.CTkLabel(cam_wrap, text="", font=("Arial", 13), text_color=ORANGE)
+        self.lbl_hint.grid(row=2, column=0, pady=(0, 10))
 
-        # ── PANEL PHẢI ───────────────────────────────────────────────────
-        right = ctk.CTkFrame(body, fg_color="transparent", width=305)
+        # Panel phải
+        right = ctk.CTkFrame(body, fg_color="transparent", width=300)
         right.grid(row=0, column=1, sticky="nsew")
         right.grid_propagate(False)
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(3, weight=1)
 
         # Card kết quả
-        res_card = ctk.CTkFrame(right, fg_color=C_CARD, corner_radius=14)
-        res_card.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(res_card, text="KẾT QUẢ NHẬN DIỆN",
-                     font=("Arial", 10, "bold"), text_color=C_DIM).pack(pady=(12, 2))
-        self.lbl_result = ctk.CTkLabel(
-            res_card, text="---",
-            font=("Arial", 20, "bold"), text_color="white",
-            wraplength=280, justify="center")
-        self.lbl_result.pack(pady=(2, 2))
-        self.lbl_status = ctk.CTkLabel(
-            res_card, text="Đang tải...",
-            font=("Arial", 11), text_color=C_DIM, wraplength=280)
-        self.lbl_status.pack(pady=(2, 12))
+        rc = ctk.CTkFrame(right, fg_color=CARD, corner_radius=14)
+        rc.grid(row=0, column=0, sticky="ew", pady=(0,8))
+        ctk.CTkLabel(rc, text="KẾT QUẢ NHẬN DIỆN",
+                     font=("Arial", 10, "bold"), text_color=DIM).pack(pady=(14,2))
+        self.lbl_result = ctk.CTkLabel(rc, text="---",
+                                       font=("Arial", 21, "bold"), text_color="white",
+                                       wraplength=270, justify="center")
+        self.lbl_result.pack(pady=(4,2))
+        self.lbl_status = ctk.CTkLabel(rc, text="Đang tải...",
+                                       font=("Arial", 11), text_color=DIM, wraplength=270)
+        self.lbl_status.pack(pady=(2,14))
 
         # Card thống kê
-        stat_card = ctk.CTkFrame(right, fg_color=C_CARD, corner_radius=14)
-        stat_card.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        stat_card.grid_columnconfigure((0, 1), weight=1)
+        sc = ctk.CTkFrame(right, fg_color=CARD, corner_radius=14)
+        sc.grid(row=1, column=0, sticky="ew", pady=(0,8))
+        sc.grid_columnconfigure((0,1), weight=1)
 
-        def make_stat(parent, label, col):
+        def stat(parent, label, col):
             f = ctk.CTkFrame(parent, fg_color="transparent")
-            f.grid(row=0, column=col, padx=6, pady=10, sticky="ew")
-            lbl = ctk.CTkLabel(f, text="0",
-                               font=("Arial", 24, "bold"), text_color=C_ACCENT)
+            f.grid(row=0, column=col, padx=8, pady=12, sticky="ew")
+            lbl = ctk.CTkLabel(f, text="0", font=("Arial", 26, "bold"), text_color=BLUE)
             lbl.pack()
-            ctk.CTkLabel(f, text=label, font=("Arial", 10),
-                         text_color=C_DIM).pack()
+            ctk.CTkLabel(f, text=label, font=("Arial", 10), text_color=DIM).pack()
             return lbl
 
-        self.lbl_emp_count   = make_stat(stat_card, "Nhân viên", 0)
-        self.lbl_today_count = make_stat(stat_card, "Lượt hôm nay", 1)
-        self.lbl_emp_count.configure(text=str(len(self.db)))
+        self.lbl_emp   = stat(sc, "Nhân viên", 0)
+        self.lbl_today = stat(sc, "Lượt hôm nay", 1)
+        self.lbl_emp.configure(text=str(len(self.db)))
 
-        # Card điều khiển
-        ctrl_card = ctk.CTkFrame(right, fg_color=C_CARD, corner_radius=14)
-        ctrl_card.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(ctrl_card, text="ĐIỀU KHIỂN",
-                     font=("Arial", 10, "bold"), text_color=C_DIM).pack(pady=(10, 4))
+        # Card nút
+        bc = ctk.CTkFrame(right, fg_color=CARD, corner_radius=14)
+        bc.grid(row=2, column=0, sticky="ew", pady=(0,8))
+        ctk.CTkLabel(bc, text="ĐIỀU KHIỂN",
+                     font=("Arial", 10, "bold"), text_color=DIM).pack(pady=(12,6))
 
-        self.btn_power = ctk.CTkButton(
-            ctrl_card, text="▶  BẬT CAMERA", height=44,
-            command=self._toggle_camera,
-            font=("Arial", 13, "bold"),
-            fg_color=C_GREEN, hover_color="#059669", corner_radius=10)
-        self.btn_power.pack(fill="x", padx=12, pady=3)
+        self.btn_cam = ctk.CTkButton(bc, text="▶  BẬT CAMERA", height=46,
+                                     command=self._toggle_cam,
+                                     font=("Arial", 13, "bold"), corner_radius=10)
+        self.btn_cam.pack(fill="x", padx=12, pady=4)
 
-        self.btn_register = ctk.CTkButton(
-            ctrl_card, text="➕  ĐĂNG KÝ NHÂN VIÊN", height=38,
-            command=self._open_register,
-            font=("Arial", 12), fg_color=C_ACCENT,
-            hover_color="#2563eb", corner_radius=10)
-        self.btn_register.pack(fill="x", padx=12, pady=3)
+        self.btn_reg = ctk.CTkButton(bc, text="➕  ĐĂNG KÝ NHÂN VIÊN", height=40,
+                                     command=self._open_register,
+                                     font=("Arial", 12), fg_color=BLUE, corner_radius=10)
+        self.btn_reg.pack(fill="x", padx=12, pady=4)
 
-        ctk.CTkButton(
-            ctrl_card, text="👥  DANH SÁCH NHÂN VIÊN", height=34,
-            command=self._open_employee_list,
-            font=("Arial", 11), fg_color=C_PANEL,
-            hover_color=C_CARD, corner_radius=10,
-            border_width=1, border_color=C_BORDER
-        ).pack(fill="x", padx=12, pady=3)
-
-        ctk.CTkButton(
-            ctrl_card, text="📋  XEM LOG CHẤM CÔNG", height=34,
-            command=self._open_log,
-            font=("Arial", 11), fg_color=C_PANEL,
-            hover_color=C_CARD, corner_radius=10,
-            border_width=1, border_color=C_BORDER
-        ).pack(fill="x", padx=12, pady=(3, 12))
+        for text, cmd in [("👥  DANH SÁCH NHÂN VIÊN", self._open_list),
+                           ("📋  XEM LOG CHẤM CÔNG",   self._open_log)]:
+            ctk.CTkButton(bc, text=text, height=36, command=cmd,
+                          font=("Arial", 11), fg_color=PANEL, corner_radius=10,
+                          border_width=1, border_color="#1e3a5f"
+                          ).pack(fill="x", padx=12, pady=4)
+        ctk.CTkLabel(bc, text="").pack(pady=2)   # padding bên dưới
 
         # Panel log hôm nay
-        log_panel = ctk.CTkFrame(right, fg_color=C_CARD, corner_radius=14)
-        log_panel.grid(row=3, column=0, sticky="nsew")
-        log_panel.grid_rowconfigure(1, weight=1)
-        log_panel.grid_columnconfigure(0, weight=1)
+        lp = ctk.CTkFrame(right, fg_color=CARD, corner_radius=14)
+        lp.grid(row=3, column=0, sticky="nsew")
+        lp.grid_rowconfigure(1, weight=1)
+        lp.grid_columnconfigure(0, weight=1)
 
-        log_top = ctk.CTkFrame(log_panel, fg_color="transparent")
-        log_top.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
-        ctk.CTkLabel(log_top, text="HOẠT ĐỘNG HÔM NAY",
-                     font=("Arial", 10, "bold"), text_color=C_DIM).pack(side="left")
-        ctk.CTkButton(
-            log_top, text="↺", width=28, height=24,
-            font=("Arial", 12), fg_color=C_PANEL,
-            command=self._refresh_today_log
-        ).pack(side="right")
+        lh = ctk.CTkFrame(lp, fg_color="transparent")
+        lh.grid(row=0, column=0, sticky="ew", padx=12, pady=(12,4))
+        ctk.CTkLabel(lh, text="HOẠT ĐỘNG HÔM NAY",
+                     font=("Arial", 10, "bold"), text_color=DIM).pack(side="left")
+        ctk.CTkButton(lh, text="↺", width=28, height=24,
+                      font=("Arial", 12), fg_color=PANEL,
+                      command=self._load_today_log).pack(side="right")
 
-        self.log_scroll = ctk.CTkScrollableFrame(
-            log_panel, fg_color="transparent", corner_radius=0)
-        self.log_scroll.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 10))
+        self.log_scroll = ctk.CTkScrollableFrame(lp, fg_color="transparent", corner_radius=0)
+        self.log_scroll.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0,12))
 
 
 if __name__ == "__main__":
-    app = AttendanceApp()
+    app = App()
     app.mainloop()
