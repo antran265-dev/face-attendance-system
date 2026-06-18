@@ -37,3 +37,15 @@ Tất cả thay đổi quan trọng của dự án được ghi lại tại đâ
 - `src/config.py` tập trung toàn bộ cấu hình
 - `README.md` mô tả dự án
 - `.gitignore` bảo vệ dữ liệu nhạy cảm
+
+## [0.3.0] — Tuần 3-4: Nâng cấp Database
+
+### Thay đổi lớn
+- Chuyển từ pickle (faces.pkl) + CSV sang SQLite qua SQLAlchemy ORM
+- Thêm models.py: bảng Employee và AttendanceLog
+- Thêm db_repository.py: lớp trung gian, không cần viết SQL trực tiếp
+- Thêm migrate.py: script chuyển dữ liệu cũ sang DB mới, an toàn không xóa file gốc
+
+### Sửa lỗi
+- Cửa sổ đăng ký đứng hình khi lưu DB lỗi — thêm try/except/finally đầy đủ
+- SQLite bị lock khi nhiều luồng truy cập đồng thời — thêm check_same_thread=False, timeout=15
